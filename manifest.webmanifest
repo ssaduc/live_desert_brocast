@@ -1,0 +1,16 @@
+{
+  "name": "연서 & 예서의 라이브 디저트 방송국",
+  "short_name": "디저트 방송국",
+  "description": "탕후루·급식·파르페를 만들고 먹방하는 우리 집 게임",
+  "lang": "ko",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#ffeef6",
+  "theme_color": "#ffb3d1",
+  "icons": [
+    {"src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"}
+  ]
+}
