@@ -1005,24 +1005,38 @@ function idbGet(k){
   });
 }
 function idbPut(k, v){ if(!gemDB) return; try { gemDB.transaction('clips', 'readwrite').objectStore('clips').put(v, k); } catch(e){} }
-function gemCall(txt){
-  const old = /3\.1|2\.5/.test(gemModel);
-  const body = old
-    ? {contents:[{parts:[{text:'Say in a ' + gemStyle() + ' voice: ' + txt}]}],
-       generationConfig:{responseModalities:['AUDIO'], speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:gemVoice}}}}}
-    : {contents:[{role:'user', parts:[{text:txt, speech_metadata:{style:gemStyle()}}]}],
-       generationConfig:{responseModalities:['AUDIO'], speechConfig:{voiceConfig:{voice:gemVoice}}}};
-  return fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(gemModel) + ':generateContent', {
+function gemPost(model, body){
+  return fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
       method:'POST', headers:{'Content-Type':'application/json', 'x-goog-api-key':gemKey}, body:JSON.stringify(body)
     }).then(function(r){
       return r.json().catch(function(){ return {}; }).then(function(j){
-        if(!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
-        const parts = ((((j.candidates || [])[0] || {}).content || {}).parts) || [];
-        const p = parts.find(function(x){ return x.inlineData && x.inlineData.data; });
-        if(!p) throw new Error('음성 데이터가 오지 않았어요');
-        return {mimeType:p.inlineData.mimeType || '', data:p.inlineData.data};
+        if(!r.ok){
+          const er = j.error || {}, e = new Error(er.message || ('HTTP ' + r.status));
+          e.status = r.status; e.reason = ((er.details || []).map(function(d){ return d.reason || ''; }).join(' ') + ' ' + (er.status || '')).trim();
+          throw e;
+        }
+        return j;
       });
     });
+}
+function gemCall(txt){
+  // Gemini 3.8 TTS 공식 형식: 말투는 speechMetadata.style, 목소리는 speechConfig.voiceConfig.voice
+  const b1 = {contents:[{role:'user', parts:[{text:txt, speechMetadata:{style:gemStyle()}}]}],
+              generationConfig:{responseModalities:['AUDIO'], speechConfig:{voiceConfig:{voice:gemVoice}}}};
+  // 형식이 맞지 않는다는 400 오류가 오면, 말투 없이 가장 기본 형식으로 한 번 더 시도
+  const b2 = {contents:[{role:'user', parts:[{text:txt}]}],
+              generationConfig:{responseModalities:['AUDIO'], speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:gemVoice}}}}};
+  const keyIssue = function(e){ return /key|referer|referrer|location|region|PERMISSION|QUOTA|RESOURCE/i.test(e.message + ' ' + (e.reason||'')); };
+  return gemPost(gemModel, b1).catch(function(e){
+    if(e.status === 400 && !keyIssue(e)) return gemPost(gemModel, b2);
+    if(e.status === 404 && gemModel !== 'gemini-3.8-flash-tts') return gemPost('gemini-3.8-flash-tts', b1);
+    throw e;
+  }).then(function(j){
+    const parts = ((((j.candidates || [])[0] || {}).content || {}).parts) || [];
+    const p = parts.find(function(x){ return x.inlineData && x.inlineData.data; });
+    if(!p){ const fr = ((j.candidates || [])[0] || {}).finishReason; throw new Error('음성 데이터가 오지 않았어요' + (fr ? ' (' + fr + ')' : '')); }
+    return {mimeType:p.inlineData.mimeType || '', data:p.inlineData.data};
+  });
 }
 function gemFetch(txt){
   const k = gemModel + '|' + gemVoice + '|' + vTone + '|' + txt;
@@ -1036,9 +1050,23 @@ function gemFetch(txt){
   return pr;
 }
 function gemWhy(e){
-  const m = String((e && e.message) || e);
-  return /Failed to fetch|NetworkError|Load failed|Content Security|violates/i.test(m)
-    ? '제미나이에 연결하지 못했어요. 인터넷 연결이나 API 키를 확인해 주세요' : m.slice(0, 140);
+  const m = String((e && e.message) || e), st = e && e.status, rs = (e && e.reason) || '', all = m + ' ' + rs;
+  try { console.warn('[Gemini TTS]', st, rs, m); } catch(x){}
+  const raw = st ? ' (오류 ' + st + (rs ? ' ' + rs : '') + ')' : '';
+  if(!st && /Failed to fetch|NetworkError|Load failed|Content Security|violates|fetch/i.test(m)){
+    if(/claude|anthropic/i.test(location.hostname) || location.protocol === 'about:' || location.origin === 'null')
+      return '이 화면(Claude 미리보기)에서는 외부 연결이 막혀 있어요. Vercel 주소나 받은 HTML 파일로 열어 주세요';
+    return '인터넷 연결을 확인해 주세요. 광고 차단 앱이나 확장 프로그램이 googleapis.com을 막고 있을 수도 있어요';
+  }
+  if(/referer|referrer/i.test(all)) return 'API 키에 웹사이트 제한이 걸려 있어요. Google Cloud 콘솔 → 사용자 인증 정보 → 이 키의 웹사이트 제한에 ' + location.origin + '/* 를 추가해 주세요' + raw;
+  if(/API key not valid|API_KEY_INVALID|API_KEY/i.test(all) || st === 401) return 'API 키가 올바르지 않아요. Google AI Studio에서 키를 다시 복사해 붙여 넣어 주세요' + raw;
+  if(st === 429 || /quota|RESOURCE_EXHAUSTED/i.test(all)) return '사용 한도를 넘었어요. 잠시 뒤 다시 해 보거나 AI Studio에서 요금제·한도를 확인해 주세요' + raw;
+  if(/location|region|country|not supported in your/i.test(all)) return '이 지역에서는 이 모델을 쓸 수 없다고 해요' + raw;
+  if(st === 403 || /PERMISSION_DENIED|SERVICE_DISABLED|not enabled|has not been used/i.test(all)) return '이 키로는 이 모델을 쓸 수 없어요. AI Studio에서 새 키를 만들어 주세요' + raw;
+  if(st === 404) return '모델을 찾지 못했어요. AI 설정에서 다른 모델을 골라 보세요' + raw;
+  if(st >= 500) return '제미나이 서버가 잠시 바빠요. 조금 뒤 다시 해 주세요' + raw;
+  if(/EncodingError|decode|Unable to decode/i.test(m)) return '받은 음성을 이 브라우저에서 재생하지 못했어요';
+  return m.slice(0, 160) + raw;
 }
 function setGemMsg(m){ gemMsg = m; const e = $('#gemmsg'); if(e) e.textContent = m; }
 function stopGem(){ gemTok++; if(gemSrc){ try { gemSrc.stop(); } catch(e){} gemSrc = null; } }
@@ -1847,7 +1875,7 @@ const ACT = {
     drawVoice();
   },
   gemSave(){
-    gemKey = $('#gemkey').value.trim(); gemVoice = $('#gemvoice').value; gemModel = $('#gemmodel').value;
+    gemKey = $('#gemkey').value.replace(/[\s"'`]/g, ''); gemVoice = $('#gemvoice').value; gemModel = $('#gemmodel').value;
     lsSet('lulu_gemkey', gemKey); lsSet('lulu_gemvoice', gemVoice); lsSet('lulu_gemmodel', gemModel);
     gemCache.clear(); stopGem();
     if(!gemKey){ gemMsg = 'API 키를 먼저 넣어 주세요'; drawVoice(); return; }
